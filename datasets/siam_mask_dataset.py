@@ -114,7 +114,7 @@ class SubDataSet(object):
                         w, h = x2 - x1, y2 - y1
                     else:
                         w, h = bbox
-                    if w == 0 or h == 0:
+                    if w <= 1 or h <= 1:
                         logger.info('Error, {name} {video} {trk} {bbox}'.format(**locals()))
                         zero += 1
                         continue
@@ -156,7 +156,7 @@ class SubDataSet(object):
 
         return image_path, image_anno, mask_path
 
-    def get_positive_pair(self, index):
+    def get_positive_pair(self, index, video_data=False):
         video_name = self.videos[index]
         video = self.labels[video_name]
         track = random.choice(list(video.keys()))
@@ -171,17 +171,18 @@ class SubDataSet(object):
             right = min(template_frame + self.frame_range, len(frames)-1) + 1
             search_range = frames[left:right]
             template_frame = frames[template_frame]
-            search_frame = random.choice(search_range)
+            search_frame = search_range if video_data else random.choice(search_range)
         else:
             search_frame = random.choice(track_info['hard'])
             left = max(search_frame - self.frame_range, 0)
             right = min(search_frame + self.frame_range, len(frames)-1) + 1  # python [left:right+1) = [left:right]
             template_range = frames[left:right]
             template_frame = random.choice(template_range)
-            search_frame = frames[search_frame]
+            search_frame = template_range if video_data else frames[search_frame]
 
         return self.get_image_anno(video_name, track, template_frame), \
-               self.get_image_anno(video_name, track, search_frame)
+               [self.get_image_anno(video_name, track, frame) for frame in search_frame] if video_data \
+               else self.get_image_anno(video_name, track, search_frame)
 
     def get_random_target(self, index=-1):
         if index == -1:
@@ -235,16 +236,33 @@ class Augmentation:
     def random():
         return random.random() * 2 - 1.0
 
-    def blur_image(self, image):
+    @staticmethod
+    def gen_random_list():
+        rand_list = {
+            'blur1': np.random.randn(1),
+            'blur2': random.random(),
+            'blur3': random.random(),
+            'shift1': Augmentation.random(),
+            'shift2': Augmentation.random(),
+            'scale1': Augmentation.random(),
+            'scale2': Augmentation.random(),
+            'blur': random.random(),
+            'resize': random.random(),
+            'rgbVar': np.random.randn(3, 1),
+            'flip': Augmentation.random()
+        }
+        return rand_list
+
+    def blur_image(self, image, rand_list):
         def rand_kernel():
-            size = np.random.randn(1)
+            size = rand_list['blur1']
             size = int(np.round(size)) * 2 + 1
             if size < 0: return None
-            if random.random() < 0.5: return None
+            if rand_list['blur2'] < 0.5: return None
             size = min(size, 45)
             kernel = np.zeros((size, size))
             c = int(size/2)
-            wx = random.random()
+            wx = rand_list['blur3']
             kernel[:, c] += 1. / size * wx
             kernel[c, :] += 1. / size * (1-wx)
             return kernel
@@ -255,11 +273,14 @@ class Augmentation:
             image = cv2.filter2D(image, -1, kernel)
         return image
 
-    def __call__(self, image, bbox, size, gray=False, mask=None):
+    def __call__(self, image, bbox, size, gray=False, mask=None, rand_list=None):
         if gray:
             grayed = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             image = np.zeros((grayed.shape[0], grayed.shape[1], 3), np.uint8)
             image[:, :, 0] = image[:, :, 1] = image[:, :, 2] = grayed
+
+        if rand_list is None:
+            rand_list = Augmentation.gen_random_list()
 
         shape = image.shape
 
@@ -267,10 +288,10 @@ class Augmentation:
 
         param = {}
         if self.shift:
-            param['shift'] = (Augmentation.random() * self.shift, Augmentation.random() * self.shift)
+            param['shift'] = (rand_list['shift1'] * self.shift, rand_list['shift2'] * self.shift)
 
         if self.scale:
-            param['scale'] = ((1.0 + Augmentation.random() * self.scale), (1.0 + Augmentation.random() * self.scale))
+            param['scale'] = ((1.0 + rand_list['scale1'] * self.scale), (1.0 + rand_list['scale2'] * self.scale))
 
         crop_bbox, _ = aug_apply(Corner(*crop_bbox), param, shape)
 
@@ -288,22 +309,22 @@ class Augmentation:
         if not mask is None:
             mask = crop_hwc(mask, crop_bbox, size)
 
-        offset = np.dot(self.rgbVar, np.random.randn(3, 1))
+        offset = np.dot(self.rgbVar, rand_list['rgbVar'])
         offset = offset[::-1]  # bgr 2 rgb
         offset = offset.reshape(3)
         image = image - offset
 
-        if self.blur > random.random():
-            image = self.blur_image(image)
+        if self.blur > rand_list['blur']:
+            image = self.blur_image(image, rand_list)
 
         if self.resize:
             imageSize = image.shape[:2]
-            ratio = max(math.pow(random.random(), 0.5), 0.2)  # 25 ~ 255
+            ratio = max(math.pow(rand_list['resize'], 0.5), 0.2)  # 25 ~ 255
             rand_size = (int(round(ratio*imageSize[0])), int(round(ratio*imageSize[1])))
             image = cv2.resize(image, rand_size)
             image = cv2.resize(image, tuple(imageSize))
 
-        if self.flip and self.flip > Augmentation.random():
+        if self.flip and self.flip > rand_list['flip']:
             image = cv2.flip(image, 1)
             mask = cv2.flip(mask, 1)
             width = image.shape[1]
